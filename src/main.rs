@@ -1,79 +1,116 @@
-use ring::aead;
-use ring::rand::{SecureRandom, SystemRandom};
-use ring::signature::{Ed25519KeyPair, KeyPair, Signature, UnparsedPublicKey, ED25519};
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private, Public};
+use openssl::derive::Deriver;
+use openssl::sign::{Signer, Verifier};
+use aes_gcm::aead::{Aead, KeyInit, generic_array::GenericArray};
+use aes_gcm::{Aes256Gcm, Nonce}; // AES-GCM 256-bit variant
+use std::error::Error;
+use openssl::ec::{EcGroup, EcKey, EcPoint};
 
-fn encrypt_data(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let sealing_key = aead::UnboundKey::new(&aead::AES_256_GCM, key).expect("Key creation failed");
-    let sealing_key = aead::LessSafeKey::new(sealing_key);
-
-    let tag_len = aead::AES_256_GCM.tag_len();  // Get the tag length at runtime
-    let mut in_out = plaintext.to_vec();
-    in_out.extend_from_slice(&vec![0u8; tag_len]); // Extend by tag length
-
-    sealing_key.seal_in_place_append_tag(aead::Nonce::try_assume_unique_for_key(nonce).unwrap(), aead::Aad::empty(), &mut in_out)
-        .expect("Encryption failed");
-
-    in_out
+pub struct EccKeyPair {
+    private_key: PKey<Private>,
+    public_key: PKey<Public>,
 }
 
-fn decrypt_data(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> {
-    let opening_key = aead::UnboundKey::new(&aead::AES_256_GCM, key).expect("Key creation failed");
-    let opening_key = aead::LessSafeKey::new(opening_key);
+impl EccKeyPair {
+    /// Generates a new ECC key pair
+    pub fn generate() -> Result<Self, Box<dyn Error>> {
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        let ec_key = EcKey::generate(&group)?;
+        let private_key = PKey::from_ec_key(ec_key.clone())?;
+        let public_key = PKey::from_ec_key(EcKey::from_public_key(&group, ec_key.public_key())?)?;
 
-    let mut in_out = ciphertext.to_vec();
-    opening_key.open_in_place(aead::Nonce::try_assume_unique_for_key(nonce).unwrap(), aead::Aad::empty(), &mut in_out)
-        .expect("Decryption failed");
+        Ok(EccKeyPair { private_key, public_key })
+    }
 
-    in_out
+    /// Signs data using the private key
+    pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut signer = Signer::new_without_digest(&self.private_key)?;
+        signer.update(data)?;
+        let signature = signer.sign_to_vec()?;
+        Ok(signature)
+    }
+
+    /// Verifies a signature using the public key
+    pub fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool, Box<dyn Error>> {
+        let mut verifier = Verifier::new_without_digest(&self.public_key)?;
+        verifier.update(data)?;
+        Ok(verifier.verify(signature)?)
+    }
+
+    /// Derives a shared secret using ECDH
+    pub fn derive_shared_secret(&self, peer_public_key: &PKey<Public>) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut deriver = Deriver::new(&self.private_key)?;
+        deriver.set_peer(peer_public_key)?;
+        let shared_secret = deriver.derive_to_vec()?;
+        Ok(shared_secret)
+    }
+
+    /// Encrypts data using AES-GCM with a derived shared secret
+    pub fn encrypt(&self, peer_public_key: &PKey<Public>, plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        let shared_secret = self.derive_shared_secret(peer_public_key).map_err(|_| aes_gcm::Error)?;
+        let key = GenericArray::from_slice(&shared_secret[..32]);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Nonce::from_slice(&[0u8; 12]);
+        let ciphertext = cipher.encrypt(nonce, plaintext)?;
+
+        Ok([nonce.as_slice(), &ciphertext].concat())
+    }
+
+    /// Decrypts data using AES-GCM with a derived shared secret
+    pub fn decrypt(&self, peer_public_key: &PKey<Public>, ciphertext_with_nonce: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+        let shared_secret = self.derive_shared_secret(peer_public_key).map_err(|_| aes_gcm::Error)?;
+        let key = GenericArray::from_slice(&shared_secret[..32]);
+        let cipher = Aes256Gcm::new(key);
+        let (nonce, ciphertext) = ciphertext_with_nonce.split_at(12);
+        let plaintext = cipher.decrypt(Nonce::from_slice(nonce), ciphertext)?;
+
+        Ok(plaintext)
+    }
+
+    /// Returns the public key as a point
+    pub fn public_key_point(&self) -> Result<EcPoint, Box<dyn Error>> {
+        let ec_key = self.public_key.ec_key()?;
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        Ok(ec_key.public_key().to_owned(&group)?)
+    }
+    
+
+    /// Exports the public key in uncompressed format
+    pub fn public_key_bytes(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        let mut ctx = openssl::bn::BigNumContext::new()?;
+        let point = self.public_key_point()?;
+        let buf = point.to_bytes(&group, openssl::ec::PointConversionForm::UNCOMPRESSED, &mut ctx)?;
+        Ok(buf)
+    }
+    
 }
 
+fn main() -> Result<(), aes_gcm::Error> {
+    let alice_keypair = EccKeyPair::generate().expect("Failed to generate key pair");
+    let bob_keypair = EccKeyPair::generate().expect("Failed to generate key pair");
 
+    let message = b"Hello, Bob!";
+    let ciphertext = alice_keypair.encrypt(&bob_keypair.public_key, message)?;
+    println!("Ciphertext: {:?}", ciphertext);
 
+    let decrypted_message = bob_keypair.decrypt(&alice_keypair.public_key, &ciphertext)?;
+    println!("Decrypted message: {:?}", String::from_utf8(decrypted_message).expect("Failed to convert to UTF-8"));
+    
+    // Generate ECC key pair
+    let ecc_keypair = EccKeyPair::generate().expect("Failed to generata key pair");
 
-fn sign_data(data: &[u8]) -> (Ed25519KeyPair, Signature) {
-    // Generate an Ed25519 key pair
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("Failed to generate key pair");
-
-    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("Failed to create key pair");
-
-    // Sign the data
-    let signature = key_pair.sign(data);
-    (key_pair, signature)
-}
-
-fn verify_signature(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), ring::error::Unspecified> {
-    let public_key = UnparsedPublicKey::new(&ED25519, public_key);
-    public_key.verify(data, signature)
-}
-
-
-fn main() {
-    let data = b"important message";
-
-    // Sign the data
-    let (key_pair, signature) = sign_data(data);
-
+        // Message to be signed
+    let message = b"Hello, ECC!";
+    
+    // Sign the message
+    let signature = ecc_keypair.sign(message).expect("signature failed");
+    println!("Signature: {:?}", signature);
+    
     // Verify the signature
-    let result = verify_signature(key_pair.public_key().as_ref(), data, signature.as_ref());
+    let is_valid = ecc_keypair.verify(message, &signature).expect("verification failed");
+    println!("Signature valid: {}", is_valid);
 
-    println!("Verification result: {:?}", result);
-
-    let rng = SystemRandom::new();
-
-    let mut key = [0u8; 32]; // 256-bit key
-    rng.fill(&mut key).expect("Failed to generate key");
-
-    let mut nonce = [0u8; 12]; // 96-bit nonce
-    rng.fill(&mut nonce).expect("Failed to generate nonce");
-
-    let plaintext = b"secret message";
-
-    let encrypted = encrypt_data(&key, &nonce, plaintext);
-    let decrypted = decrypt_data(&key, &nonce, &encrypted);
-
-    println!("Plaintext: {:?}", std::str::from_utf8(plaintext));
-    println!("Encrypted: {:?}", std::str::from_utf8(&encrypted));
-    println!("Decrypted: {:?}", std::str::from_utf8(&decrypted));
-
+    Ok(())
 }
