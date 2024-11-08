@@ -1,4 +1,3 @@
-use openssl::ec::{EcGroup, EcKey};
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private, Public};
 use openssl::derive::Deriver;
@@ -6,6 +5,7 @@ use openssl::sign::{Signer, Verifier};
 use aes_gcm::aead::{Aead, KeyInit, generic_array::GenericArray};
 use aes_gcm::{Aes256Gcm, Nonce}; // AES-GCM 256-bit variant
 use std::error::Error;
+use openssl::ec::{EcGroup, EcKey, EcPoint};
 
 pub struct EccKeyPair {
     private_key: PKey<Private>,
@@ -67,6 +67,24 @@ impl EccKeyPair {
 
         Ok(plaintext)
     }
+
+    /// Returns the public key as a point
+    pub fn public_key_point(&self) -> Result<EcPoint, Box<dyn Error>> {
+        let ec_key = self.public_key.ec_key()?;
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        Ok(ec_key.public_key().to_owned(&group)?)
+    }
+    
+
+    /// Exports the public key in uncompressed format
+    pub fn public_key_bytes(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        let mut ctx = openssl::bn::BigNumContext::new()?;
+        let point = self.public_key_point()?;
+        let buf = point.to_bytes(&group, openssl::ec::PointConversionForm::UNCOMPRESSED, &mut ctx)?;
+        Ok(buf)
+    }
+    
 }
 
 fn main() -> Result<(), aes_gcm::Error> {
@@ -79,6 +97,20 @@ fn main() -> Result<(), aes_gcm::Error> {
 
     let decrypted_message = bob_keypair.decrypt(&alice_keypair.public_key, &ciphertext)?;
     println!("Decrypted message: {:?}", String::from_utf8(decrypted_message).expect("Failed to convert to UTF-8"));
+    
+    // Generate ECC key pair
+    let ecc_keypair = EccKeyPair::generate().expect("Failed to generata key pair");
+
+        // Message to be signed
+    let message = b"Hello, ECC!";
+    
+    // Sign the message
+    let signature = ecc_keypair.sign(message).expect("signature failed");
+    println!("Signature: {:?}", signature);
+    
+    // Verify the signature
+    let is_valid = ecc_keypair.verify(message, &signature).expect("verification failed");
+    println!("Signature valid: {}", is_valid);
 
     Ok(())
 }
