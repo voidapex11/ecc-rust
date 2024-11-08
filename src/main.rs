@@ -1,4 +1,3 @@
-use openssl::bn::BigNum;
 use openssl::ec::{EcGroup, EcKey, EcPoint};
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private, Public};
@@ -39,19 +38,20 @@ impl EccKeyPair {
     /// Returns the public key as a point
     pub fn public_key_point(&self) -> Result<EcPoint, Box<dyn Error>> {
         let ec_key = self.public_key.ec_key()?;
-        Ok(ec_key.public_key().to_owned())
+        let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
+        Ok(ec_key.public_key().to_owned(&group)?)
     }
+    
 
     /// Exports the public key in uncompressed format
     pub fn public_key_bytes(&self) -> Result<Vec<u8>, Box<dyn Error>> {
         let group = EcGroup::from_curve_name(Nid::SECP256K1)?;
         let mut ctx = openssl::bn::BigNumContext::new()?;
         let point = self.public_key_point()?;
-        let mut buf = Vec::new();
-        buf.resize(group.degree() as usize / 8 + 1, 0);
-        point.to_bytes(&group, openssl::ec::PointConversionForm::UNCOMPRESSED, &mut buf, &mut ctx)?;
+        let buf = point.to_bytes(&group, openssl::ec::PointConversionForm::UNCOMPRESSED, &mut ctx)?;
         Ok(buf)
     }
+    
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
