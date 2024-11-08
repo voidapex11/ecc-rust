@@ -1,6 +1,29 @@
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair, Signature, UnparsedPublicKey, ED25519};
+use std::borrow::Borrow;
+
+fn generate_keypair() -> Ed25519KeyPair {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("Failed to generate key pair");
+
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("Failed to create key pair");
+    return key_pair;
+}
+
+fn sign_data(key_pair: &Ed25519KeyPair,data: &[u8]) -> Signature {
+
+    // Sign the data
+    let signature = key_pair.sign(data);
+    return signature;
+}
+
+fn verify_signature(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), ring::error::Unspecified> {
+    let public_key = UnparsedPublicKey::new(&ED25519, public_key);
+    public_key.verify(data, signature)
+}
+
+
 
 fn encrypt_data(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let sealing_key = aead::UnboundKey::new(&aead::AES_256_GCM, key).expect("Key creation failed");
@@ -27,44 +50,26 @@ fn decrypt_data(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     in_out
 }
 
-
-
-
-fn sign_data(data: &[u8]) -> (Ed25519KeyPair, Signature) {
-    // Generate an Ed25519 key pair
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("Failed to generate key pair");
-
-    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("Failed to create key pair");
-
-    // Sign the data
-    let signature = key_pair.sign(data);
-    (key_pair, signature)
-}
-
-fn verify_signature(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), ring::error::Unspecified> {
-    let public_key = UnparsedPublicKey::new(&ED25519, public_key);
-    public_key.verify(data, signature)
-}
-
-
 fn main() {
     let data = b"important message";
 
+    let key_pair: Ed25519KeyPair = generate_keypair();
+
     // Sign the data
-    let (key_pair, signature) = sign_data(data);
+    let signature = sign_data(key_pair.borrow() ,data);
 
     // Verify the signature
     let result = verify_signature(key_pair.public_key().as_ref(), data, signature.as_ref());
 
     println!("Verification result: {:?}", result);
 
+
     let rng = SystemRandom::new();
 
     let mut key = [0u8; 32]; // 256-bit key
     rng.fill(&mut key).expect("Failed to generate key");
 
-    let mut nonce = [0u8; 12]; // 96-bit nonce
+    let mut nonce: [u8; 12] = [0u8; 12]; // 96-bit nonce
     rng.fill(&mut nonce).expect("Failed to generate nonce");
 
     let plaintext = b"secret message";
@@ -72,8 +77,7 @@ fn main() {
     let encrypted = encrypt_data(&key, &nonce, plaintext);
     let decrypted = decrypt_data(&key, &nonce, &encrypted);
 
-    println!("Plaintext: {:?}", std::str::from_utf8(plaintext));
-    println!("Encrypted: {:?}", std::str::from_utf8(&encrypted));
-    println!("Decrypted: {:?}", std::str::from_utf8(&decrypted));
-
+    println!("Plaintext: {:?}", plaintext);
+    println!("Encrypted: {:?}", encrypted);
+    println!("Decrypted: {:?}", decrypted);
 }
